@@ -1,0 +1,61 @@
+name: 同步到 Hugging Face Spaces
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'tonebarrier-server/**'
+  workflow_dispatch:
+
+jobs:
+  sync-to-hf:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          lfs: true
+
+      - name: 推送到 HF Spaces
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_USERNAME: ${{ secrets.HF_USERNAME }}
+          HF_SPACE: skills-demo
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
+          LLM_MODEL: ${{ secrets.LLM_MODEL }}
+        run: |
+          git config --global user.email "github-actions@github.com"
+          git config --global user.name "GitHub Actions"
+
+          git clone https://user:${HF_TOKEN}@huggingface.co/spaces/${HF_USERNAME}/${HF_SPACE} hf-space
+
+          rsync -av --delete \
+            --exclude='.git' \
+            --exclude='history.db' \
+            --exclude='*.log' \
+            --exclude='batch_results_*.json' \
+            --exclude='batch_test_*.json' \
+            --exclude='config.py' \
+            --exclude='harassment/' \
+            tonebarrier-server/ hf-space/
+
+          # 从 .example 生成 config.py 并注入 LLM 配置（来自 GH secrets）
+          # 真实 key 不入仓、不出现在 git log
+          if [ -n "$LLM_API_KEY" ]; then
+            echo "✓ 注入 LLM 配置: model=$LLM_MODEL base_url=$LLM_BASE_URL"
+            sed -e "s|^LLM_API_KEY = .*|LLM_API_KEY = os.environ.get(\"LLM_API_KEY\", \"$LLM_API_KEY\")|" \
+                -e "s|^LLM_BASE_URL = .*|LLM_BASE_URL = os.environ.get(\"LLM_BASE_URL\", \"$LLM_BASE_URL\")|" \
+                -e "s|^LLM_MODEL = .*|LLM_MODEL = os.environ.get(\"LLM_MODEL\", \"$LLM_MODEL\")|" \
+                hf-space/config.py.example > hf-space/config.py
+          elif [ -f hf-space/config.py ]; then
+            echo "! LLM_API_KEY 未在 GH secrets 配，保留 Space 现有 config.py"
+          else
+            echo "⚠ LLM_API_KEY 未配且 config.py 不存在，从 .example 复制空模板"
+            cp hf-space/config.py.example hf-space/config.py
+          fi
+
+          cd hf-space
+          git add -A
+          git diff --staged --quiet || git commit -m "sync: $(date '+%Y-%m-%d %H:%M') from GitHub"
+          git push
